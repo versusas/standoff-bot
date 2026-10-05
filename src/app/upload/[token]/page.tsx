@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, use } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useParams } from "next/navigation";
 
 interface JobStatus {
   status: string;
@@ -10,8 +11,9 @@ interface JobStatus {
   errorMessage?: string;
 }
 
-export default function UploadPage({ params }: { params: Promise<{ token: string }> }) {
-  const { token } = use(params);
+export default function UploadPage() {
+  const params = useParams<{ token: string }>();
+  const token = params?.token;
   const [video1, setVideo1] = useState<File | null>(null);
   const [video2, setVideo2] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -21,12 +23,15 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
   const [error, setError] = useState<string | null>(null);
   const [valid, setValid] = useState<boolean | null>(null);
 
-  // Verify token on load
   useEffect(() => {
+    if (!token) return;
+
     fetch(`/api/session/${token}`)
       .then((r) => {
         setValid(r.ok);
-        if (!r.ok) setError("Ссылка недействительна. Нажми /start в боте.");
+        if (!r.ok) {
+          setError("Ссылка недействительна. Нажми /start в боте.");
+        }
       })
       .catch(() => {
         setValid(false);
@@ -42,24 +47,29 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
         setJob(data);
         return data.status === "completed" || data.status === "error";
       }
-    } catch { /* */ }
+    } catch {
+      console.error("Poll error");
+    }
     return false;
   }, []);
 
   useEffect(() => {
     if (!jobId) return;
+
     const interval = setInterval(async () => {
       const done = await pollJob(jobId);
       if (done) clearInterval(interval);
     }, 3000);
+
     return () => clearInterval(interval);
   }, [jobId, pollJob]);
 
   const handleSubmit = async () => {
-    if (!video1 || !video2) {
+    if (!video1 || !video2 || !token) {
       setError("Загрузи оба видео!");
       return;
     }
+
     setError(null);
     setUploading(true);
     setUploadProgress(10);
@@ -69,8 +79,6 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
       formData.append("video1", video1);
       formData.append("video2", video2);
       formData.append("token", token);
-
-      setUploadProgress(20);
 
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/upload");
@@ -101,15 +109,22 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
 
   const getProgress = () => {
     if (!job) return uploading ? uploadProgress : 0;
+
     const map: Record<string, number> = {
-      processing: 15, detecting: 25, trimming: 45,
-      screenshots: 60, merging: 75, uploading: 90,
-      completed: 100, error: 100,
+      processing: 15,
+      detecting: 25,
+      trimming: 45,
+      screenshots: 60,
+      merging: 75,
+      uploading: 90,
+      completed: 100,
+      error: 100,
     };
+
     return map[job.status] || 10;
   };
 
-  if (valid === null) {
+  if (!token || valid === null) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
         <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
@@ -120,10 +135,12 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
   if (valid === false) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center px-4">
-        <div className="text-center">
+        <div className="text-center max-w-md">
           <p className="text-6xl mb-4">❌</p>
           <p className="text-xl text-red-400">{error}</p>
-          <p className="text-gray-500 mt-2">Нажми /start в Telegram-боте чтобы получить новую ссылку</p>
+          <p className="text-gray-500 mt-2">
+            Нажми /start в Telegram-боте чтобы получить новую ссылку
+          </p>
         </div>
       </div>
     );
@@ -132,7 +149,6 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white">
       <div className="max-w-lg mx-auto px-4 py-6">
-        {/* Header */}
         <div className="text-center mb-6">
           <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
             🎮 Standoff Bot
@@ -142,7 +158,6 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
 
         {!jobId && (
           <div className="space-y-4">
-            {/* Video 1 */}
             <div className="bg-gray-800/60 rounded-xl p-4 border border-gray-700/50">
               <label className="block mb-2">
                 <span className="font-semibold text-blue-400">📹 Видео 1</span>
@@ -152,7 +167,7 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
                 type="file"
                 accept="video/*"
                 onChange={(e) => setVideo1(e.target.files?.[0] || null)}
-                className="block w-full text-sm text-gray-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-600 file:text-white file:text-sm file:font-semibold"
+                className="block w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-600 file:text-white file:font-semibold"
               />
               {video1 && (
                 <p className="text-xs text-green-400 mt-1">
@@ -161,7 +176,6 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
               )}
             </div>
 
-            {/* Video 2 */}
             <div className="bg-gray-800/60 rounded-xl p-4 border border-gray-700/50">
               <label className="block mb-2">
                 <span className="font-semibold text-purple-400">📹 Видео 2</span>
@@ -171,7 +185,7 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
                 type="file"
                 accept="video/*"
                 onChange={(e) => setVideo2(e.target.files?.[0] || null)}
-                className="block w-full text-sm text-gray-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-purple-600 file:text-white file:text-sm file:font-semibold"
+                className="block w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-purple-600 file:text-white file:font-semibold"
               />
               {video2 && (
                 <p className="text-xs text-green-400 mt-1">
@@ -208,16 +222,17 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
           </div>
         )}
 
-        {/* Processing */}
         {jobId && (
           <div className="space-y-4">
             <div className="bg-gray-800/60 rounded-xl p-5 border border-gray-700/50">
               <div className="w-full bg-gray-700 rounded-full h-4 mb-3">
                 <div
                   className={`h-4 rounded-full transition-all duration-700 ${
-                    job?.status === "error" ? "bg-red-500" :
-                    job?.status === "completed" ? "bg-green-500" :
-                    "bg-gradient-to-r from-blue-500 to-purple-500"
+                    job?.status === "error"
+                      ? "bg-red-500"
+                      : job?.status === "completed"
+                        ? "bg-green-500"
+                        : "bg-gradient-to-r from-blue-500 to-purple-500"
                   }`}
                   style={{ width: `${getProgress()}%` }}
                 />
@@ -250,11 +265,9 @@ export default function UploadPage({ params }: { params: Promise<{ token: string
                   </div>
                 )}
 
-                {job.screenshots && job.screenshots.length > 0 && (
-                  <div className="bg-blue-900/20 border border-blue-700/50 rounded-xl p-4">
-                    <p className="text-blue-400 font-bold mb-2">📸 Скриншоты отправлены в Telegram</p>
-                  </div>
-                )}
+                <div className="bg-blue-900/20 border border-blue-700/50 rounded-xl p-4">
+                  <p className="text-blue-400 font-bold">📸 Скриншоты будут отправлены в Telegram</p>
+                </div>
               </div>
             )}
 
