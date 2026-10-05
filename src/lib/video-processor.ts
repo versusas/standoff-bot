@@ -1,285 +1,199 @@
 import { exec } from "child_process";
 import { promisify } from "util";
+import ffmpegPath from "ffmpeg-static";
+import ffprobeStatic from "ffprobe-static";
 import fs from "fs";
 import path from "path";
 
 const execAsync = promisify(exec);
 
-/**
- * Get video duration in seconds
- */
+// Use bundled binaries — no system ffmpeg/ffprobe needed
+const FFMPEG = ffmpegPath ?? "ffmpeg";
+const FFPROBE = ffprobeStatic.path ?? "ffprobe";
+
+function q(s: string) { return `"${s.replace(/"/g, '\\"')}"`; }
+const ff  = (a: string) => `${q(FFMPEG)}  ${a}`;
+const fpp = (a: string) => `${q(FFPROBE)} ${a}`;
+
+// ─── duration ─────────────────────────────────────────────
+
 export async function getVideoDuration(videoPath: string): Promise<number> {
+  // Try ffprobe first
   try {
     const { stdout } = await execAsync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
+      fpp(`-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ${q(videoPath)}`),
       { maxBuffer: 10 * 1024 * 1024 }
     );
-    return parseFloat(stdout.trim());
-  } catch (error) {
-    console.warn("ffprobe failed, trying ffmpeg fallback for duration:", error);
-    // Fallback using ffmpeg output if ffprobe is missing
-    const { stderr } = await execAsync(`ffmpeg -i "${videoPath}" 2>&1`).catch(e => e);
-    const match = stderr.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
-    if (match) {
-      const hours = parseInt(match[1]);
-      const minutes = parseInt(match[2]);
-      const seconds = parseFloat(match[3]);
-      return hours * 3600 + minutes * 60 + seconds;
-    }
-    throw new Error("Could not determine video duration (ffprobe and ffmpeg failed)");
-  }
+    const d = parseFloat(stdout.trim());
+    if (Number.isFinite(d) && d > 0) return d;
+  } catch { /* fall through */ }
+
+  // Fallback: parse ffmpeg -i stderr
+  try {
+    const result = await execAsync(ff(`-i ${q(videoPath)}`), { maxBuffer: 10 * 1024 * 1024 }).catch(e => e as { stderr?: string });
+    const stderr = (result as { stderr?: string }).stderr ?? "";
+    const m = stderr.match(/Duration:\s+(\d+):(\d+):(\d+\.\d+)/);
+    if (m) return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+  } catch { /* ignore */ }
+
+  throw new Error("Cannot determine video duration");
 }
 
-/**
- * VIDEO 1: Find where black screen STARTS at the END of the video
- * (user opens the game → black loading screen appears → we cut HERE)
- * 
- * Returns the timestamp where we should END video 1
- */
+// ─── VIDEO 1: last black screen start (end of recording) ──
+
 export async function findBlackScreenAtEnd(videoPath: string): Promise<number> {
+  const duration = await getVideoDuration(videoPath);
+  console.log(`V1 duration: ${duration.toFixed(1)}s`);
+
+  let output = "";
   try {
-    const duration = await getVideoDuration(videoPath);
-    console.log(`Video 1 duration: ${duration}s`);
+    await execAsync(
+      ff(`-i ${q(videoPath)} -vf "blackdetect=d=0.5:pix_th=0.12" -an -f null -`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
+    );
+  } catch (e) { output = (e as { stderr?: string }).stderr ?? ""; }
 
-    // Run blackdetect on the video
-    const cmd = `ffmpeg -i "${videoPath}" -vf "blackdetect=d=0.5:pix_th=0.12" -an -f null - 2>&1`;
-    let output = "";
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  const re = /black_start:(\d+\.?\d*)/g;
+  while ((m = re.exec(output)) !== null) starts.push(parseFloat(m[1]));
+  console.log(`V1 black starts: ${starts.length}`, starts.slice(-5));
 
-    try {
-      const { stderr } = await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 300000 });
-      output = stderr;
-    } catch (error) {
-      const err = error as { stderr?: string };
-      if (err.stderr) output = err.stderr;
-    }
+  if (starts.length === 0) return Math.max(0, duration - 3);
 
-    // Find all black screen segments
-    const blackStarts: number[] = [];
-    const regex = /black_start:(\d+\.?\d*)/g;
-    let match;
-    while ((match = regex.exec(output)) !== null) {
-      blackStarts.push(parseFloat(match[1]));
-    }
-
-    console.log(`Found ${blackStarts.length} black segments:`, blackStarts);
-
-    if (blackStarts.length === 0) {
-      // No black screen found — use last 5 seconds as fallback
-      console.log("No black screen found, cutting last 5 seconds");
-      return Math.max(0, duration - 5);
-    }
-
-    // We want the LAST black screen (the game loading screen at the end)
-    // Find the last black_start that is in the last 2 minutes of the video
-    const cutoffTime = Math.max(0, duration - 120);
-    let lastBlackStart = blackStarts[blackStarts.length - 1];
-
-    for (let i = blackStarts.length - 1; i >= 0; i--) {
-      if (blackStarts[i] >= cutoffTime) {
-        lastBlackStart = blackStarts[i];
-      }
-    }
-
-    console.log(`Cutting video 1 at: ${lastBlackStart}s (black screen start at end)`);
-    return lastBlackStart;
-  } catch (error) {
-    console.error("Error finding black screen:", error);
-    const duration = await getVideoDuration(videoPath);
-    return Math.max(0, duration - 5);
+  const cutoff = Math.max(0, duration - 120);
+  for (let i = starts.length - 1; i >= 0; i--) {
+    if (starts[i] >= cutoff) return starts[i];
   }
+  return starts[starts.length - 1];
 }
 
-/**
- * VIDEO 2: Find where the black screen / loading ENDS at the BEGINNING
- * (game loads → logo → gameplay starts → we start HERE)
- * 
- * Returns the timestamp where video 2 should START
- */
+// ─── VIDEO 2: first black screen end (start of game) ──────
+
 export async function findGameplayStart(videoPath: string): Promise<number> {
+  let output = "";
   try {
-    // Run blackdetect on first 2 minutes of the video
-    const cmd = `ffmpeg -t 120 -i "${videoPath}" -vf "blackdetect=d=0.3:pix_th=0.15" -an -f null - 2>&1`;
-    let output = "";
+    await execAsync(
+      ff(`-t 120 -i ${q(videoPath)} -vf "blackdetect=d=0.3:pix_th=0.15" -an -f null -`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 180000 }
+    );
+  } catch (e) { output = (e as { stderr?: string }).stderr ?? ""; }
 
-    try {
-      const { stderr } = await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 180000 });
-      output = stderr;
-    } catch (error) {
-      const err = error as { stderr?: string };
-      if (err.stderr) output = err.stderr;
-    }
+  const ends: number[] = [];
+  let m: RegExpExecArray | null;
+  const re = /black_end:(\d+\.?\d*)/g;
+  while ((m = re.exec(output)) !== null) ends.push(parseFloat(m[1]));
+  console.log(`V2 black ends:`, ends);
 
-    // Find all black_end timestamps
-    const blackEnds: number[] = [];
-    const regex = /black_end:(\d+\.?\d*)/g;
-    let match;
-    while ((match = regex.exec(output)) !== null) {
-      blackEnds.push(parseFloat(match[1]));
-    }
+  if (ends.length > 0) return ends[ends.length - 1];
 
-    console.log(`Video 2 black ends:`, blackEnds);
-
-    if (blackEnds.length === 0) {
-      // No black screen — might start with logo, use scene detection
-      console.log("No black screen in video 2 start, trying scene detection...");
-      return await findFirstBigSceneChange(videoPath);
-    }
-
-    // The last black_end in the first 2 minutes = where gameplay starts
-    const lastBlackEnd = blackEnds[blackEnds.length - 1];
-    console.log(`Video 2 gameplay starts at: ${lastBlackEnd}s`);
-    return lastBlackEnd;
-  } catch (error) {
-    console.error("Error finding gameplay start:", error);
-    return 0;
-  }
-}
-
-/**
- * Find the first big scene change (loading screen → gameplay transition)
- */
-async function findFirstBigSceneChange(videoPath: string): Promise<number> {
+  // Fallback: first scene change
+  let sceneOut = "";
   try {
-    const cmd = `ffmpeg -t 120 -i "${videoPath}" -vf "select='gt(scene,0.4)',showinfo" -vsync vfr -f null - 2>&1`;
-    let output = "";
+    await execAsync(
+      ff(`-t 120 -i ${q(videoPath)} -vf "select='gt(scene,0.4)',showinfo" -fps_mode vfr -f null -`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 180000 }
+    );
+  } catch (e) { sceneOut = (e as { stderr?: string }).stderr ?? ""; }
 
-    try {
-      const { stderr } = await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 180000 });
-      output = stderr;
-    } catch (error) {
-      const err = error as { stderr?: string };
-      if (err.stderr) output = err.stderr;
-    }
-
-    const match = output.match(/pts_time:\s*(\d+\.?\d*)/);
-    if (match) {
-      const time = parseFloat(match[1]);
-      console.log(`First big scene change at: ${time}s`);
-      return time;
-    }
-  } catch (error) {
-    console.error("Scene detection error:", error);
-  }
+  const sm = sceneOut.match(/pts_time:\s*(\d+\.?\d*)/);
+  if (sm) return parseFloat(sm[1]);
   return 0;
 }
 
-/**
- * Detect scene changes in video (tab switches on Android + buy phase)
- * Returns timestamps where significant visual changes occur
- */
+// ─── scene changes (tab switches + buy phase) ─────────────
+
 export async function detectSceneChanges(videoPath: string): Promise<number[]> {
+  let output = "";
   try {
-    const cmd = `ffmpeg -i "${videoPath}" -vf "select='gt(scene,0.35)',showinfo" -vsync vfr -f null - 2>&1`;
-    let output = "";
+    await execAsync(
+      ff(`-i ${q(videoPath)} -vf "select='gt(scene,0.35)',showinfo" -fps_mode vfr -f null -`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
+    );
+  } catch (e) { output = (e as { stderr?: string }).stderr ?? ""; }
 
-    try {
-      const { stderr } = await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 300000 });
-      output = stderr;
-    } catch (error) {
-      const err = error as { stderr?: string };
-      if (err.stderr) output = err.stderr;
-    }
-
-    return parseSceneTimestamps(output);
-  } catch (error) {
-    console.error("Error detecting scene changes:", error);
-    return [];
-  }
-}
-
-function parseSceneTimestamps(output: string): number[] {
   const timestamps: number[] = [];
-  const lines = output.split("\n");
-
-  for (const line of lines) {
-    const match = line.match(/pts_time:\s*(\d+\.?\d*)/);
-    if (match) {
-      const time = parseFloat(match[1]);
-      // Filter timestamps too close together (within 1.5 seconds)
-      if (timestamps.length === 0 || time - timestamps[timestamps.length - 1] > 1.5) {
-        timestamps.push(time);
+  for (const line of output.split("\n")) {
+    const m = line.match(/pts_time:\s*(\d+\.?\d*)/);
+    if (m) {
+      const t = parseFloat(m[1]);
+      if (timestamps.length === 0 || t - timestamps[timestamps.length - 1] > 1.5) {
+        timestamps.push(t);
       }
     }
   }
-
-  console.log(`Found ${timestamps.length} scene changes:`, timestamps);
+  console.log(`Scene changes: ${timestamps.length}`);
   return timestamps;
 }
 
-/**
- * Trim video: keep from start to endTime
- */
-export async function trimVideoEnd(
-  inputPath: string,
-  endTime: number,
-  outputPath: string
-): Promise<void> {
-  // No -s flag: keep original resolution
-  const cmd = `ffmpeg -y -i "${inputPath}" -t ${endTime} -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${outputPath}"`;
-  console.log(`Trim video end: keep 0 to ${endTime}s`);
-  await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 300000 });
+// ─── trim — stream copy, no re-encode, original quality ───
+
+export async function trimVideoEnd(input: string, endTime: number, output: string): Promise<void> {
+  try {
+    // Stream copy (instant, no quality loss)
+    await execAsync(
+      ff(`-y -i ${q(input)} -t ${endTime} -c copy ${q(output)}`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
+    );
+  } catch {
+    // Fallback: re-encode without -s (keep original resolution)
+    await execAsync(
+      ff(`-y -i ${q(input)} -t ${endTime} -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k ${q(output)}`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
+    );
+  }
+  console.log(`V1 trimmed: 0→${endTime}s`);
 }
 
-/**
- * Trim video: keep from startTime to end
- */
-export async function trimVideoStart(
-  inputPath: string,
-  startTime: number,
-  outputPath: string
-): Promise<void> {
-  // No -s flag: keep original resolution
-  const cmd = `ffmpeg -y -ss ${startTime} -i "${inputPath}" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "${outputPath}"`;
-  console.log(`Trim video start: keep ${startTime}s to end`);
-  await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 300000 });
+export async function trimVideoStart(input: string, startTime: number, output: string): Promise<void> {
+  try {
+    // Stream copy
+    await execAsync(
+      ff(`-y -ss ${startTime} -i ${q(input)} -c copy ${q(output)}`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
+    );
+  } catch {
+    // Fallback
+    await execAsync(
+      ff(`-y -ss ${startTime} -i ${q(input)} -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k ${q(output)}`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
+    );
+  }
+  console.log(`V2 trimmed: ${startTime}s→end`);
 }
 
-/**
- * Extract a frame from video at specific timestamp
- */
-export async function extractFrame(
-  videoPath: string,
-  timestamp: number,
-  outputPath: string
-): Promise<void> {
-  const cmd = `ffmpeg -y -ss ${timestamp} -i "${videoPath}" -frames:v 1 -q:v 2 "${outputPath}"`;
-  await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 30000 });
+// ─── extract screenshot ────────────────────────────────────
+
+export async function extractFrame(videoPath: string, timestamp: number, outputPath: string): Promise<void> {
+  await execAsync(
+    ff(`-y -ss ${timestamp} -i ${q(videoPath)} -frames:v 1 -q:v 2 ${q(outputPath)}`),
+    { maxBuffer: 10 * 1024 * 1024, timeout: 30000 }
+  );
 }
 
-/**
- * Merge two videos into one seamlessly
- */
-export async function mergeVideos(
-  video1Path: string,
-  video2Path: string,
-  outputPath: string
-): Promise<void> {
-  // Re-encode both with identical parameters so the concat is seamless
-  const dir = path.dirname(outputPath);
-  const v1Norm = path.join(dir, "v1_norm.mp4");
-  const v2Norm = path.join(dir, "v2_norm.mp4");
+// ─── merge ────────────────────────────────────────────────
 
-  // Normalize both videos to same format
-  // No -s flag: keep original resolution, keep original framerate
-  const normCmd = (input: string, output: string) =>
-    `ffmpeg -y -i "${input}" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k -ar 44100 -ac 2 "${output}"`;
+export async function mergeVideos(v1: string, v2: string, output: string): Promise<void> {
+  const dir = path.dirname(output);
+  const listPath = path.join(dir, "concat.txt");
+  fs.writeFileSync(listPath, `file '${v1}'\nfile '${v2}'`);
 
-  console.log("Normalizing videos for seamless merge...");
-  await Promise.all([
-    execAsync(normCmd(video1Path, v1Norm), { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }),
-    execAsync(normCmd(video2Path, v2Norm), { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }),
-  ]);
+  try {
+    // Fast concat (stream copy, no quality loss, keeps original resolution)
+    await execAsync(
+      ff(`-y -f concat -safe 0 -i ${q(listPath)} -c copy ${q(output)}`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 120000 }
+    );
+    console.log("Merge: stream copy OK");
+  } catch {
+    // Fallback: re-encode (NO -s flag — keep original resolution)
+    console.log("Merge: falling back to re-encode...");
+    await execAsync(
+      ff(`-y -i ${q(v1)} -i ${q(v2)} -filter_complex "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[ov][oa]" -map "[ov]" -map "[oa]" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k ${q(output)}`),
+      { maxBuffer: 50 * 1024 * 1024, timeout: 600000 }
+    );
+    console.log("Merge: re-encode OK");
+  }
 
-  // Concat with demuxer
-  const listPath = path.join(dir, "concat_list.txt");
-  fs.writeFileSync(listPath, `file '${v1Norm}'\nfile '${v2Norm}'`);
-
-  const cmd = `ffmpeg -y -f concat -safe 0 -i "${listPath}" -c copy "${outputPath}"`;
-  console.log("Merging normalized videos...");
-  await execAsync(cmd, { maxBuffer: 50 * 1024 * 1024, timeout: 120000 });
-
-  // Cleanup
-  try { fs.unlinkSync(v1Norm); } catch { /* */ }
-  try { fs.unlinkSync(v2Norm); } catch { /* */ }
-  try { fs.unlinkSync(listPath); } catch { /* */ }
+  try { fs.unlinkSync(listPath); } catch { /* ignore */ }
 }
