@@ -1,10 +1,13 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 
-const databaseUrl = process.env.DATABASE_URL;
+const fallbackDatabaseUrl = "postgresql://postgres:postgres@127.0.0.1:5432/app_db";
+const databaseUrl = process.env.DATABASE_URL || fallbackDatabaseUrl;
 
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL is required");
+if (!process.env.DATABASE_URL) {
+  console.warn(
+    "DATABASE_URL is not set at import time. Using fallback URL for build/runtime bootstrap."
+  );
 }
 
 const globalForDb = globalThis as typeof globalThis & {
@@ -24,9 +27,9 @@ if (process.env.NODE_ENV !== "production") {
 
 export const db = drizzle(pool);
 
-// Auto-create tables on first use
 export async function ensureTables() {
   if (globalForDb.__dbTablesCreated) return;
+
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS jobs (
@@ -52,9 +55,11 @@ export async function ensureTables() {
         created_at TIMESTAMP DEFAULT NOW() NOT NULL
       );
     `);
+
     globalForDb.__dbTablesCreated = true;
     console.log("✅ Database tables ready");
   } catch (err) {
     console.error("❌ Failed to create tables:", err);
+    throw err;
   }
 }
