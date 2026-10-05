@@ -8,8 +8,28 @@ import path from "path";
 const execAsync = promisify(exec);
 
 // Use bundled binaries — no system ffmpeg/ffprobe needed
-const FFMPEG = ffmpegPath ?? "ffmpeg";
-const FFPROBE = ffprobeStatic.path ?? "ffprobe";
+// Resolve absolute path to handle cases where the module returns null
+function resolveBin(bin: string | null, fallback: string): string {
+  if (bin && bin.length > 0) return bin;
+  // Try common locations
+  const candidates = [
+    `${process.cwd()}/node_modules/ffmpeg-static/ffmpeg`,
+    `${process.cwd()}/node_modules/ffprobe-static/bin/linux/x64/ffprobe`,
+    fallback,
+  ];
+  for (const c of candidates) {
+    try {
+      if (require("fs").existsSync(c)) return c;
+    } catch { /* */ }
+  }
+  return fallback;
+}
+
+const FFMPEG  = resolveBin(ffmpegPath,        "ffmpeg");
+const FFPROBE = resolveBin(ffprobeStatic.path, "ffprobe");
+
+console.log(`[video-processor] FFMPEG:  ${FFMPEG}`);
+console.log(`[video-processor] FFPROBE: ${FFPROBE}`);
 
 function q(s: string) { return `"${s.replace(/"/g, '\\"')}"`; }
 const ff  = (a: string) => `${q(FFMPEG)}  ${a}`;
