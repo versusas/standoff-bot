@@ -7,35 +7,39 @@ import path from "path";
 
 const execAsync = promisify(exec);
 
-// Use bundled binaries — no system ffmpeg/ffprobe needed
-// Resolve absolute path to handle cases where the module returns null
-function resolveBin(bin: string | null, fallback: string): string {
-  if (bin && bin.length > 0) return bin;
-  // Try common locations
-  const candidates = [
-    `${process.cwd()}/node_modules/ffmpeg-static/ffmpeg`,
-    `${process.cwd()}/node_modules/ffprobe-static/bin/linux/x64/ffprobe`,
-    fallback,
-  ];
-  for (const c of candidates) {
-    try {
-      if (require("fs").existsSync(c)) return c;
-    } catch { /* */ }
+// Resolve ffmpeg/ffprobe — try module path first, then search node_modules
+function findBin(fromModule: string | null, searchPaths: string[], fallback: string): string {
+  if (fromModule && fs.existsSync(fromModule)) return fromModule;
+  for (const p of searchPaths) {
+    if (fs.existsSync(p)) return p;
   }
   return fallback;
 }
 
-const FFMPEG  = resolveBin(ffmpegPath,        "ffmpeg");
-const FFPROBE = resolveBin(ffprobeStatic.path, "ffprobe");
+// All possible locations on Railway (/ROOT) or standard (/app)
+const roots = [process.cwd(), "/ROOT", "/app", process.env.RAILWAY_SNAPSHOT_ID ? "/ROOT" : process.cwd()];
+
+const FFMPEG = findBin(
+  ffmpegPath,
+  roots.flatMap(r => [`${r}/node_modules/ffmpeg-static/ffmpeg`]),
+  "ffmpeg"
+);
+
+const FFPROBE = findBin(
+  ffprobeStatic.path,
+  roots.flatMap(r => [
+    `${r}/node_modules/ffprobe-static/bin/linux/x64/ffprobe`,
+    `${r}/node_modules/ffprobe-static/bin/linux/ia32/ffprobe`,
+  ]),
+  "ffprobe"
+);
 
 // Ensure execute permissions
-try {
-  require("fs").chmodSync(FFMPEG,  0o755);
-  require("fs").chmodSync(FFPROBE, 0o755);
-} catch { /* might fail if system binary, that's ok */ }
+try { fs.chmodSync(FFMPEG,  0o755); } catch { /* ok */ }
+try { fs.chmodSync(FFPROBE, 0o755); } catch { /* ok */ }
 
-console.log(`[video-processor] FFMPEG:  ${FFMPEG}`);
-console.log(`[video-processor] FFPROBE: ${FFPROBE}`);
+console.log(`[ffmpeg]  ${FFMPEG}  exists=${fs.existsSync(FFMPEG)}`);
+console.log(`[ffprobe] ${FFPROBE}  exists=${fs.existsSync(FFPROBE)}`);
 
 function q(s: string) { return `"${s.replace(/"/g, '\\"')}"`; }
 const ff  = (a: string) => `${q(FFMPEG)}  ${a}`;
@@ -62,7 +66,7 @@ export async function getVideoDuration(videoPath: string): Promise<number> {
     if (m) return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
   } catch { /* ignore */ }
 
-  throw new Error(`Cannot determine video duration. FFMPEG=${FFMPEG}, FFPROBE=${FFPROBE}, file=${videoPath}, exists=${require("fs").existsSync(videoPath)}`);
+  throw new Error(`Cannot determine video duration. FFMPEG=${FFMPEG} (exists=${fs.existsSync(FFMPEG)}), FFPROBE=${FFPROBE} (exists=${fs.existsSync(FFPROBE)}), videoFile=${videoPath} (exists=${fs.existsSync(videoPath)})`);
 }
 
 // ─── VIDEO 1: last black screen start (end of recording) ──
