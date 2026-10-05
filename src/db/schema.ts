@@ -1,4 +1,4 @@
-import { pgTable, serial, text, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, jsonb, bigint } from "drizzle-orm/pg-core";
 
 export const jobs = pgTable("jobs", {
   id: serial("id").primaryKey(),
@@ -12,4 +12,14 @@ export const jobs = pgTable("jobs", {
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const sessions = pgTable("sessions", {
+  id: serial("id").primaryKey(),
+  token: text("token").notNull().unique(),
+  chatId: bigint("chat_id", { mode: "number" }).notNull(),
+  username: text("username"),
+  jobId: text("job_id"),
+  status: text("status").notNull().default("waiting"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
 });
