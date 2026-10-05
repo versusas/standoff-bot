@@ -1,17 +1,15 @@
-import { setupBot } from "@/lib/telegram-bot";
-
-let botStarted = false;
+import { setupBot, getBot } from "@/lib/telegram-bot";
 
 export async function GET() {
-  if (!botStarted && process.env.TELEGRAM_BOT_TOKEN) {
-    try {
-      setupBot();
-      botStarted = true;
-      console.log("Bot started via health check");
-    } catch (e) {
-      console.error("Failed to start bot:", e);
-    }
+  // Fallback: if instrumentation didn't start the bot, start it here
+  if (!getBot() && process.env.TELEGRAM_BOT_TOKEN) {
+    console.log("Health: starting bot as fallback...");
+    setupBot();
   }
 
-  return Response.json({ ok: true, botActive: botStarted });
+  return Response.json({
+    ok: true,
+    botActive: !!getBot(),
+    time: new Date().toISOString(),
+  });
 }
