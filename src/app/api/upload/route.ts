@@ -93,9 +93,11 @@ export async function POST(request: NextRequest) {
         if (!chatId) return;
 
         // Send screenshots
+        console.log(`Sending ${result.screenshotPaths.length} screenshots to chat ${chatId}`);
         if (result.screenshotPaths.length > 0) {
           await sendMessage(chatId, `📸 Скриншоты (${result.screenshotPaths.length}):`);
           for (let i = 0; i < result.screenshotPaths.length; i++) {
+            console.log(`Sending screenshot ${i+1}: ${result.screenshotPaths[i]}, exists=${fs.existsSync(result.screenshotPaths[i])}`);
             await sendPhoto(chatId, result.screenshotPaths[i], `Скриншот ${i + 1}`);
           }
         }

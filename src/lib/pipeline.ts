@@ -4,10 +4,8 @@ import { db } from "@/db";
 import { jobs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import {
-  findBlackScreenAtEnd,
-  findGameplayStart,
+  findCutPointVideo1,
   trimVideoEnd,
-  trimVideoStart,
   detectSceneChanges,
   extractFrame,
   mergeVideos,
@@ -38,16 +36,17 @@ export interface ProcessResult {
 }
 
 /**
- * Main processing pipeline:
+ * Pipeline:
  * 
- * VIDEO 1: Системные настройки → открытие игры → ЧЁРНЫЙ ЭКРАН
- *   → Обрезаем чёрный экран В КОНЦЕ (оставляем всё до него)
+ * V1: [настройки] → [открытие игры] → [ЧЁРНЫЙ ЭКРАН] → [логотип/загрузка]
+ *   → Обрезаем логотип/загрузку ПОСЛЕ чёрного экрана
+ *   → Чёрный экран ОСТАЁТСЯ (мост к V2)
  * 
- * VIDEO 2: Загрузка игры (чёрный/логотип) → ГЕЙМПЛЕЙ → вкладки
- *   → Обрезаем загрузку В НАЧАЛЕ (оставляем с геймплея)
- *   → Делаем скриншоты фазы покупки + вкладок
+ * V2: [ЧЁРНЫЙ ЭКРАН] → [загрузка] → [меню] → [геймплей] → [вкладки]
+ *   → НЕ обрезаем начало — чёрный экран это мост от V1
+ *   → Скриншоты: фаза покупки + вкладки
  * 
- * MERGE: Video1 (до чёрного) + Video2 (с геймплея) = плавный переход
+ * MERGE: V1(с чёрным в конце) + V2(с чёрным в начале) = плавный переход
  */
 export async function processVideos(
   jobId: number,
@@ -57,44 +56,37 @@ export async function processVideos(
   const workDir = path.dirname(video1Path);
 
   try {
-    // ====== STEP 1: Analyze both videos in parallel ======
+    // ====== STEP 1: Analyze V1 + detect scenes in V2 ======
     await updateJob(jobId, {
       status: "detecting",
-      statusMessage: "🔍 Анализирую оба видео...",
+      statusMessage: "🔍 Анализирую видео...",
     });
 
-    const [cutEndAt, cutStartAt, sceneTimestamps] = await Promise.all([
-      findBlackScreenAtEnd(video1Path),
-      findGameplayStart(video2Path),
+    const [cutV1At, sceneTimestamps] = await Promise.all([
+      findCutPointVideo1(video1Path),
       detectSceneChanges(video2Path),
     ]);
 
-    console.log(`Video 1: cut at ${cutEndAt}s (black screen start)`);
-    console.log(`Video 2: start at ${cutStartAt}s (gameplay start)`);
-    console.log(`Scene changes: ${sceneTimestamps.length}`);
+    console.log(`V1: cut at ${cutV1At}s`);
+    console.log(`V2: keep from start (black screen bridge)`);
+    console.log(`Scene changes in V2: ${sceneTimestamps.length}`);
 
     await updateJob(jobId, {
-      trimPoint: `V1 до ${cutEndAt.toFixed(1)}с | V2 с ${cutStartAt.toFixed(1)}с`,
-      statusMessage: `✂️ V1: обрезаю после ${cutEndAt.toFixed(1)}с | V2: обрезаю до ${cutStartAt.toFixed(1)}с`,
+      trimPoint: `V1 до ${cutV1At.toFixed(1)}с | V2 целиком`,
     });
 
-    // ====== STEP 2: Trim both videos in parallel ======
+    // ====== STEP 2: Trim V1 (remove logo/loading after black screen) ======
     await updateJob(jobId, {
       status: "trimming",
-      statusMessage: "✂️ Обрезаю оба видео...",
+      statusMessage: "✂️ Обрезаю первое видео...",
     });
 
     const trimmed1 = path.join(workDir, "trimmed1.mp4");
-    const trimmed2 = path.join(workDir, "trimmed2.mp4");
+    await trimVideoEnd(video1Path, cutV1At, trimmed1);
 
-    await Promise.all([
-      trimVideoEnd(video1Path, cutEndAt, trimmed1),
-      trimVideoStart(video2Path, cutStartAt, trimmed2),
-    ]);
+    // V2 is used as-is (no trimming — black screen at start is the bridge)
 
-    console.log("Both videos trimmed");
-
-    // ====== STEP 3: Extract screenshots from video 2 ======
+    // ====== STEP 3: Extract screenshots from V2 ======
     await updateJob(jobId, {
       status: "screenshots",
       statusMessage: `📸 Делаю скриншоты (${sceneTimestamps.length} моментов)...`,
@@ -115,15 +107,17 @@ export async function processVideos(
       }
     }
 
-    // ====== STEP 4: Merge videos seamlessly ======
+    console.log(`Total screenshots: ${screenshotPaths.length}`);
+
+    // ====== STEP 4: Merge V1(trimmed) + V2(full) ======
     await updateJob(jobId, {
       status: "merging",
-      statusMessage: "🔗 Склеиваю видео (без видимого перехода)...",
+      statusMessage: "🔗 Склеиваю видео...",
     });
 
     const mergedPath = path.join(workDir, "merged.mp4");
-    await mergeVideos(trimmed1, trimmed2, mergedPath);
-    console.log("Videos merged seamlessly");
+    await mergeVideos(trimmed1, video2Path, mergedPath);
+    console.log("Merge complete");
 
     // ====== STEP 5: Upload to GoFile ======
     await updateJob(jobId, {
@@ -141,8 +135,8 @@ export async function processVideos(
       screenshots: screenshotPaths,
     });
 
-    // Cleanup temp files
-    for (const f of [video1Path, video2Path, trimmed1, trimmed2]) {
+    // Cleanup
+    for (const f of [video1Path, video2Path, trimmed1]) {
       try { fs.unlinkSync(f); } catch { /* */ }
     }
 
