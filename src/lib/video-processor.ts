@@ -9,11 +9,25 @@ const execAsync = promisify(exec);
  * Get video duration in seconds
  */
 export async function getVideoDuration(videoPath: string): Promise<number> {
-  const { stdout } = await execAsync(
-    `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
-    { maxBuffer: 10 * 1024 * 1024 }
-  );
-  return parseFloat(stdout.trim());
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
+      { maxBuffer: 10 * 1024 * 1024 }
+    );
+    return parseFloat(stdout.trim());
+  } catch (error) {
+    console.warn("ffprobe failed, trying ffmpeg fallback for duration:", error);
+    // Fallback using ffmpeg output if ffprobe is missing
+    const { stderr } = await execAsync(`ffmpeg -i "${videoPath}" 2>&1`).catch(e => e);
+    const match = stderr.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
+    if (match) {
+      const hours = parseInt(match[1]);
+      const minutes = parseInt(match[2]);
+      const seconds = parseFloat(match[3]);
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+    throw new Error("Could not determine video duration (ffprobe and ffmpeg failed)");
+  }
 }
 
 /**
