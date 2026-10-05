@@ -28,6 +28,12 @@ function resolveBin(bin: string | null, fallback: string): string {
 const FFMPEG  = resolveBin(ffmpegPath,        "ffmpeg");
 const FFPROBE = resolveBin(ffprobeStatic.path, "ffprobe");
 
+// Ensure execute permissions
+try {
+  require("fs").chmodSync(FFMPEG,  0o755);
+  require("fs").chmodSync(FFPROBE, 0o755);
+} catch { /* might fail if system binary, that's ok */ }
+
 console.log(`[video-processor] FFMPEG:  ${FFMPEG}`);
 console.log(`[video-processor] FFPROBE: ${FFPROBE}`);
 
@@ -56,7 +62,7 @@ export async function getVideoDuration(videoPath: string): Promise<number> {
     if (m) return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
   } catch { /* ignore */ }
 
-  throw new Error("Cannot determine video duration");
+  throw new Error(`Cannot determine video duration. FFMPEG=${FFMPEG}, FFPROBE=${FFPROBE}, file=${videoPath}, exists=${require("fs").existsSync(videoPath)}`);
 }
 
 // ─── VIDEO 1: last black screen start (end of recording) ──
