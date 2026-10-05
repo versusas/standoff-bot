@@ -1,36 +1,29 @@
 import { Telegraf } from "telegraf";
+import type { Update } from "telegraf/types";
 import crypto from "crypto";
 import { db, ensureTables } from "@/db";
 import { sessions } from "@/db/schema";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
-
 let botInstance: Telegraf | null = null;
+let webhookConfigured = false;
 
 export function getBot(): Telegraf | null {
   return botInstance;
 }
 
-function getAppUrl(): string {
+export function getAppUrl(): string {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
-  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  }
   return "http://localhost:3000";
 }
 
-export async function setupBot() {
-  if (!botToken) {
-    console.warn("TELEGRAM_BOT_TOKEN is not set.");
-    return;
-  }
-  if (botInstance) return;
-
-  // Create tables first
-  await ensureTables();
-
-  console.log("🚀 Starting Telegram bot...");
-
-  const bot = new Telegraf(botToken);
-  botInstance = bot;
+function registerHandlers(bot: Telegraf) {
+  bot.catch((err) => {
+    console.error("Telegram bot handler error:", err);
+  });
 
   bot.start(async (ctx) => {
     try {
@@ -49,18 +42,18 @@ export async function setupBot() {
 
       await ctx.reply(
         `🎮 Привет, ${username}!\n\n` +
-        `Я обработаю твои записи Standoff 2:\n` +
-        `✂️ Обрежу чёрный экран\n` +
-        `🔗 Склею два видео\n` +
-        `📸 Скриншоты фазы покупки и вкладок\n` +
-        `☁️ Загружу и дам ссылку\n\n` +
-        `📲 Открой ссылку и загрузи 2 видео:\n\n` +
-        `${uploadUrl}\n\n` +
-        `⏱ Результат пришлю сюда через ~5 мин.`
+          `Я обработаю твои записи Standoff 2:\n` +
+          `✂️ Обрежу чёрный экран\n` +
+          `🔗 Склею два видео\n` +
+          `📸 Сделаю скриншоты фазы покупки и вкладок\n` +
+          `☁️ Загружу видео и дам ссылку\n\n` +
+          `📲 Открой ссылку и загрузи 2 видео:\n\n` +
+          `${uploadUrl}\n\n` +
+          `⏱ Результат пришлю сюда через ~5 минут.`
       );
     } catch (err) {
       console.error("Bot /start error:", err);
-      await ctx.reply("❌ Ошибка. Попробуй /start ещё раз через минуту.");
+      await ctx.reply("❌ Ошибка. Попробуй /start ещё раз.");
     }
   });
 
@@ -78,44 +71,102 @@ export async function setupBot() {
       });
 
       const uploadUrl = `${getAppUrl()}/upload/${token}`;
-      await ctx.reply(`📲 Ссылка:\n\n${uploadUrl}`);
+      await ctx.reply(`📲 Ссылка для загрузки:\n\n${uploadUrl}`);
     } catch (err) {
       console.error("Bot /upload error:", err);
-      await ctx.reply("❌ Ошибка.");
+      await ctx.reply("❌ Ошибка. Попробуй ещё раз.");
     }
   });
 
-  bot.on("message", (ctx) => {
-    ctx.reply("Нажми /start чтобы получить ссылку для загрузки видео.");
+  bot.on("message", async (ctx) => {
+    await ctx.reply("Нажми /start чтобы получить ссылку для загрузки видео.");
   });
+}
 
-  try {
-    await bot.launch({ dropPendingUpdates: true });
-    console.log("✅ Telegram bot is running!");
-  } catch (err) {
-    console.error("❌ Bot launch failed:", err);
-    botInstance = null;
+export function createBot(): Telegraf {
+  if (!botToken) {
+    throw new Error("TELEGRAM_BOT_TOKEN is not set");
   }
 
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
+  if (botInstance) {
+    return botInstance;
+  }
+
+  const bot = new Telegraf(botToken);
+  registerHandlers(bot);
+  botInstance = bot;
+  return bot;
+}
+
+export async function ensureWebhook() {
+  if (!botToken) {
+    console.warn("TELEGRAM_BOT_TOKEN is not set.");
+    return;
+  }
+
+  const bot = createBot();
+  const webhookUrl = `${getAppUrl()}/api/telegram`;
+
+  try {
+    const info = await bot.telegram.getWebhookInfo();
+    if (info.url === webhookUrl) {
+      webhookConfigured = true;
+      console.log(`✅ Telegram webhook already configured: ${webhookUrl}`);
+      return;
+    }
+
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    await bot.telegram.setWebhook(webhookUrl, {
+      drop_pending_updates: true,
+      allowed_updates: ["message"],
+    });
+
+    webhookConfigured = true;
+    console.log(`✅ Telegram webhook set: ${webhookUrl}`);
+  } catch (err) {
+    console.error("❌ Failed to configure Telegram webhook:", err);
+    webhookConfigured = false;
+  }
+}
+
+export async function setupBot() {
+  try {
+    await ensureTables();
+
+    if (!botToken) {
+      console.warn("Telegram bot skipped: TELEGRAM_BOT_TOKEN is not set");
+      return;
+    }
+
+    createBot();
+    await ensureWebhook();
+    console.log(`🤖 Telegram bot ready in webhook mode (${webhookConfigured ? "configured" : "not configured"})`);
+  } catch (error) {
+    console.error("setupBot error:", error);
+  }
+}
+
+export async function handleTelegramUpdate(update: Update) {
+  const bot = createBot();
+  await bot.handleUpdate(update);
 }
 
 export async function sendMessage(chatId: number, text: string) {
-  if (!botInstance) return;
   try {
-    await botInstance.telegram.sendMessage(chatId, text);
+    const bot = createBot();
+    await bot.telegram.sendMessage(chatId, text);
   } catch (err) {
     console.error("sendMessage error:", err);
   }
 }
 
 export async function sendPhoto(chatId: number, photoPath: string, caption?: string) {
-  if (!botInstance) return;
   try {
     const fs = await import("fs");
     if (!fs.existsSync(photoPath)) return;
-    await botInstance.telegram.sendPhoto(
+
+    const bot = createBot();
+    await bot.telegram.sendPhoto(
       chatId,
       { source: fs.createReadStream(photoPath) },
       { caption }

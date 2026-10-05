@@ -1,12 +1,12 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    console.log("⚡ Instrumentation: starting bot + keep-alive...");
+    console.log("⚡ Instrumentation: preparing bot webhook + keep-alive...");
 
     try {
       const { setupBot } = await import("@/lib/telegram-bot");
       await setupBot();
     } catch (err) {
-      console.error("Bot start error:", err);
+      console.error("Bot setup error:", err);
     }
 
     try {
