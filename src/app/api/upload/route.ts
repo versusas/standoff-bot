@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
-import { db } from "@/db";
+import { db, ensureTables } from "@/db";
 import { jobs, sessions } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { processVideos } from "@/lib/pipeline";
 import { sendMessage, sendPhoto } from "@/lib/telegram-bot";
 
 export async function POST(request: Request) {
+  await ensureTables();
   try {
     const formData = await request.formData();
     const video1 = formData.get("video1") as File | null;
