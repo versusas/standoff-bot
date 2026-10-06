@@ -86,12 +86,12 @@ export async function hasAudioStream(videoPath: string): Promise<boolean> {
   try {
     const { stdout } = await runFfprobe([
       "-v", "error",
-      "-select_streams", "a:0",
-      "-show_entries", "stream=index",
+      "-select_streams", "a",
+      "-show_entries", "stream=codec_type",
       "-of", "csv=p=0",
       videoPath,
     ]);
-    return stdout.trim().length > 0;
+    return stdout.trim().includes("audio");
   } catch {
     return false;
   }
@@ -244,38 +244,60 @@ export async function extractFrame(videoPath: string, timestamp: number, outputP
 
 // Merge normalized videos reliably
 export async function mergeVideos(v1: string, v2: string, output: string): Promise<void> {
-  const v1Audio = await hasAudioStream(v1);
-  const v2Audio = await hasAudioStream(v2);
+  const v1Audio = await hasAudioStream(v1).catch(() => false);
+  const v2Audio = await hasAudioStream(v2).catch(() => false);
 
-  if (v1Audio && v2Audio) {
+  console.log(`[Merge] v1 audio: ${v1Audio}, v2 audio: ${v2Audio}`);
+
+  try {
+    if (v1Audio && v2Audio) {
+      await runFfmpeg([
+        "-y",
+        "-i", v1,
+        "-i", v2,
+        "-filter_complex", "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[ov][oa]",
+        "-map", "[ov]",
+        "-map", "[oa]",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        output,
+      ], { timeout: 900000, maxBuffer: 150 * 1024 * 1024 });
+    } else {
+      // If any video is missing audio, merge video streams only
+      await runFfmpeg([
+        "-y",
+        "-i", v1,
+        "-i", v2,
+        "-filter_complex", "[0:v:0][1:v:0]concat=n=2:v=1:a=0[ov]",
+        "-map", "[ov]",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-an",
+        "-movflags", "+faststart",
+        output,
+      ], { timeout: 900000, maxBuffer: 150 * 1024 * 1024 });
+    }
+  } catch (error) {
+    console.warn("[Merge] filter_complex failed, falling back to simple stream copy concat...");
+    // Fallback if filter_complex fails for any reason (e.g. mismatched resolutions)
+    const listPath = path.join(path.dirname(output), "concat.txt");
+    fs.writeFileSync(listPath, `file '${path.basename(v1)}'\nfile '${path.basename(v2)}'`);
+    
     await runFfmpeg([
       "-y",
-      "-i", v1,
-      "-i", v2,
-      "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[ov][oa]",
-      "-map", "[ov]",
-      "-map", "[oa]",
-      "-c:v", "libx264",
-      "-preset", "ultrafast",
-      "-crf", "23",
-      "-c:a", "aac",
-      "-b:a", "128k",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listPath,
+      "-c", "copy",
       "-movflags", "+faststart",
-      output,
-    ], { timeout: 900000, maxBuffer: 150 * 1024 * 1024 });
-  } else {
-    await runFfmpeg([
-      "-y",
-      "-i", v1,
-      "-i", v2,
-      "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[ov]",
-      "-map", "[ov]",
-      "-c:v", "libx264",
-      "-preset", "ultrafast",
-      "-crf", "23",
-      "-an",
-      "-movflags", "+faststart",
-      output,
-    ], { timeout: 900000, maxBuffer: 150 * 1024 * 1024 });
+      output
+    ], { timeout: 120000, maxBuffer: 50 * 1024 * 1024 });
+    
+    try { fs.unlinkSync(listPath); } catch { /* ignore */ }
   }
 }
